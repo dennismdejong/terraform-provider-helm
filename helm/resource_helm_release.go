@@ -98,6 +98,7 @@ type HelmReleaseModel struct {
 	RepositoryCertFile       types.String     `tfsdk:"repository_cert_file"`
 	RepositoryKeyFile        types.String     `tfsdk:"repository_key_file"`
 	RepositoryPassword       types.String     `tfsdk:"repository_password"`
+	RepositoryPasswordWO     types.String     `tfsdk:"repository_password_wo"`
 	RepositoryUsername       types.String     `tfsdk:"repository_username"`
 	ResetValues              types.Bool       `tfsdk:"reset_values"`
 	ReuseValues              types.Bool       `tfsdk:"reuse_values"`
@@ -476,6 +477,11 @@ func (r *HelmRelease) Schema(ctx context.Context, req resource.SchemaRequest, re
 				Sensitive:   true,
 				Description: "Password for HTTP basic authentication",
 			},
+			"repository_password_wo": schema.StringAttribute{
+				Optional:    true,
+				WriteOnly:   true,
+				Description: "Password for HTTP basic authentication (write-only)",
+			},
 			"repository_username": schema.StringAttribute{
 				Optional:    true,
 				Description: "Username for HTTP basic authentication",
@@ -792,14 +798,19 @@ func (r *HelmRelease) Create(ctx context.Context, req resource.CreateRequest, re
 		resp.Diagnostics.AddError("Error getting helm configuration", fmt.Sprintf("Unable to get Helm configuration for namespace %s: %s", namespace, err))
 		return
 	}
-	ociDiags := OCIRegistryLogin(ctx, meta, actionConfig, meta.RegistryClient, state.Repository.ValueString(), state.Chart.ValueString(), state.RepositoryUsername.ValueString(), state.RepositoryPassword.ValueString())
+	repoPassword := state.RepositoryPassword.ValueString()
+	if !config.RepositoryPasswordWO.IsNull() && config.RepositoryPasswordWO.ValueString() != "" {
+		repoPassword = config.RepositoryPasswordWO.ValueString()
+	}
+
+	ociDiags := OCIRegistryLogin(ctx, meta, actionConfig, meta.RegistryClient, state.Repository.ValueString(), state.Chart.ValueString(), state.RepositoryUsername.ValueString(), repoPassword)
 	resp.Diagnostics.Append(ociDiags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	client := action.NewInstall(actionConfig)
-	cpo, chartName, cpoDiags := chartPathOptions(&state, meta, &client.ChartPathOptions)
+	cpo, chartName, cpoDiags := chartPathOptions(&state, meta, &client.ChartPathOptions, repoPassword)
 	resp.Diagnostics.Append(cpoDiags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -1106,14 +1117,19 @@ func (r *HelmRelease) Update(ctx context.Context, req resource.UpdateRequest, re
 		resp.Diagnostics.AddError("Error getting helm configuration", fmt.Sprintf("Unable to get Helm configuration for namespace %s: %s", namespace, err))
 		return
 	}
-	ociDiags := OCIRegistryLogin(ctx, meta, actionConfig, meta.RegistryClient, state.Repository.ValueString(), state.Chart.ValueString(), state.RepositoryUsername.ValueString(), state.RepositoryPassword.ValueString())
+	repoPassword := state.RepositoryPassword.ValueString()
+	if !config.RepositoryPasswordWO.IsNull() && config.RepositoryPasswordWO.ValueString() != "" {
+		repoPassword = config.RepositoryPasswordWO.ValueString()
+	}
+
+	ociDiags := OCIRegistryLogin(ctx, meta, actionConfig, meta.RegistryClient, state.Repository.ValueString(), state.Chart.ValueString(), state.RepositoryUsername.ValueString(), repoPassword)
 	resp.Diagnostics.Append(ociDiags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 	client := action.NewUpgrade(actionConfig)
 
-	cpo, chartName, cpoDiags := chartPathOptions(&plan, meta, &client.ChartPathOptions)
+	cpo, chartName, cpoDiags := chartPathOptions(&plan, meta, &client.ChartPathOptions, repoPassword)
 	resp.Diagnostics.Append(cpoDiags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -1298,7 +1314,7 @@ func (r *HelmRelease) Delete(ctx context.Context, req resource.DeleteRequest, re
 	}
 }
 
-func chartPathOptions(model *HelmReleaseModel, meta *Meta, cpo *action.ChartPathOptions) (*action.ChartPathOptions, string, diag.Diagnostics) {
+func chartPathOptions(model *HelmReleaseModel, meta *Meta, cpo *action.ChartPathOptions, password string) (*action.ChartPathOptions, string, diag.Diagnostics) {
 	var diags diag.Diagnostics
 	chartName := model.Chart.ValueString()
 	repository := model.Repository.ValueString()
@@ -1334,7 +1350,7 @@ func chartPathOptions(model *HelmReleaseModel, meta *Meta, cpo *action.ChartPath
 		cpo.Version = version
 	}
 	cpo.Username = model.RepositoryUsername.ValueString()
-	cpo.Password = model.RepositoryPassword.ValueString()
+	cpo.Password = password
 	cpo.PassCredentialsAll = model.PassCredentials.ValueBool()
 
 	return cpo, chartName, diags
@@ -1955,14 +1971,18 @@ func (r *HelmRelease) ModifyPlan(ctx context.Context, req resource.ModifyPlanReq
 		resp.Diagnostics.AddError("Error getting Helm configuration", err.Error())
 		return
 	}
+	repoPassword := plan.RepositoryPassword.ValueString()
+	if !config.RepositoryPasswordWO.IsNull() && config.RepositoryPasswordWO.ValueString() != "" {
+		repoPassword = config.RepositoryPasswordWO.ValueString()
+	}
+
 	tflog.Debug(ctx, fmt.Sprintf("%s Initial Values: Name=%s, Namespace=%s, Repository=%s, Repository_Username=%s, Repository_Password=%s, Chart=%s", logID,
-		name, namespace, plan.Repository.ValueString(), plan.RepositoryUsername.ValueString(), plan.RepositoryPassword.ValueString(), plan.Chart.ValueString()))
+		name, namespace, plan.Repository.ValueString(), plan.RepositoryUsername.ValueString(), repoPassword, plan.Chart.ValueString()))
 
 	repositoryURL := plan.Repository.ValueString()
 	repositoryUsername := plan.RepositoryUsername.ValueString()
-	repositoryPassword := plan.RepositoryPassword.ValueString()
 	chartName := plan.Chart.ValueString()
-	ociDiags := OCIRegistryLogin(ctx, meta, actionConfig, meta.RegistryClient, repositoryURL, chartName, repositoryUsername, repositoryPassword)
+	ociDiags := OCIRegistryLogin(ctx, meta, actionConfig, meta.RegistryClient, repositoryURL, chartName, repositoryUsername, repoPassword)
 	resp.Diagnostics.Append(ociDiags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -1987,7 +2007,7 @@ func (r *HelmRelease) ModifyPlan(ctx context.Context, req resource.ModifyPlanReq
 	}
 
 	client := action.NewInstall(actionConfig)
-	cpo, chartName, diags := chartPathOptions(&plan, meta, &client.ChartPathOptions)
+	cpo, chartName, diags := chartPathOptions(&plan, meta, &client.ChartPathOptions, repoPassword)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
@@ -2013,7 +2033,7 @@ func (r *HelmRelease) ModifyPlan(ctx context.Context, req resource.ModifyPlanReq
 	}
 
 	if plan.Lint.ValueBool() {
-		diags := resourceReleaseValidate(ctx, &plan, meta, cpo)
+		diags := resourceReleaseValidate(ctx, &plan, meta, cpo, repoPassword)
 		if diags.HasError() {
 			resp.Diagnostics.Append(diags...)
 			return
@@ -2309,10 +2329,10 @@ func recomputeMetadata(plan HelmReleaseModel, state *HelmReleaseModel) bool {
 	return false
 }
 
-func resourceReleaseValidate(ctx context.Context, model *HelmReleaseModel, meta *Meta, cpo *action.ChartPathOptions) diag.Diagnostics {
+func resourceReleaseValidate(ctx context.Context, model *HelmReleaseModel, meta *Meta, cpo *action.ChartPathOptions, password string) diag.Diagnostics {
 	var diags diag.Diagnostics
 
-	cpo, name, chartDiags := chartPathOptions(model, meta, cpo)
+	cpo, name, chartDiags := chartPathOptions(model, meta, cpo, password)
 	diags.Append(chartDiags...)
 	if diags.HasError() {
 		diags.AddError("Malformed values", fmt.Sprintf("Chart path options error: %s", chartDiags))
